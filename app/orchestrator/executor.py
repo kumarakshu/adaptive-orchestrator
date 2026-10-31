@@ -26,7 +26,18 @@ class ProviderNotFoundError(ExecutionError):
 
 class ProviderExecutionError(ExecutionError):
     """Raised when an underlying provider fails during prompt execution."""
-    pass
+
+    def __init__(
+        self,
+        message: str,
+        status_code: Optional[int] = None,
+        retry_after: Optional[float] = None,
+        cause_type: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
+        self.cause_type = cause_type
 
 
 class ExecutionResult(BaseModel):

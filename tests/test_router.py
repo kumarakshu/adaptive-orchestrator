@@ -287,7 +287,12 @@ def test_router_gemini_only_provider_excludes_others():
 
     # 2. Complex query prefers ADVANCED (which has only openai/anthropic in defaults)
     # Router must fall back to the available Gemini model in lightweight tier
-    decision_complex = router.route("Very complex coding task with reasoning steps")
+    complex_query = (
+        "Step 1: Refactor auth middleware for async concurrency.\n"
+        "Step 2: Optimize algorithm performance.\n"
+        "Constraints: Strictly keep memory below 10MB."
+    )
+    decision_complex = router.route(complex_query)
     assert decision_complex.model.provider == "google"
     assert decision_complex.model_id == "gemini-3.8-flash"
     assert decision_complex.fallback_used is True

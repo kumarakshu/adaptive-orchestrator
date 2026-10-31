@@ -221,7 +221,7 @@ async def test_anthropic_empty_content():
 
 
 # =====================================================================
-# Google Gemini Provider Tests
+# Google Gemini Provider Tests (Interactions API)
 # =====================================================================
 
 @pytest.mark.asyncio
@@ -231,28 +231,31 @@ async def test_gemini_success():
     def handler(request: httpx.Request) -> httpx.Response:
         recorded_requests.append(request)
         url_str = str(request.url)
-        assert "gemini-3.8-flash:generateContent" in url_str
+        assert url_str.endswith("/v1beta/interactions")
         body = json.loads(request.content.decode("utf-8"))
-        assert len(body["contents"]) == 1
-        assert body["contents"][0]["role"] == "user"
-        assert body["contents"][0]["parts"][0]["text"] == "Hello Gemini"
-        assert "system_instruction" in body
-        assert "generationConfig" not in body
+        assert body["model"] == "gemini-3.8-flash"
+        assert body["input"] == "Hello Gemini"
+        assert body["store"] is False
+        assert body["system_instruction"] == "System directive"
+        assert body["generation_config"]["thinking_level"] == "low"
         return httpx.Response(
             200,
             json={
-                "candidates": [
+                "id": "int_123",
+                "status": "completed",
+                "steps": [
                     {
-                        "content": {
-                            "parts": [{"text": "Gemini response text"}],
-                            "role": "model",
-                        },
-                        "finishReason": "STOP",
-                    }
+                        "type": "thought",
+                        "signature": "thought-sig",
+                    },
+                    {
+                        "type": "model_output",
+                        "content": [{"type": "text", "text": "Gemini interaction response text"}],
+                    },
                 ],
-                "usageMetadata": {
-                    "promptTokenCount": 9,
-                    "candidatesTokenCount": 16,
+                "usage": {
+                    "prompt_tokens": 9,
+                    "completion_tokens": 16,
                 },
             },
         )
@@ -267,10 +270,71 @@ async def test_gemini_success():
         context={"system_prompt": "System directive"},
     )
 
-    assert res["content"] == "Gemini response text"
+    assert res["content"] == "Gemini interaction response text"
     assert res["prompt_tokens"] == 9
     assert res["completion_tokens"] == 16
     assert recorded_requests[0].headers["x-goog-api-key"] == "gemini-secret-key"
+
+
+@pytest.mark.asyncio
+async def test_gemini_interactions_output_text_fallback():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "int_456",
+                "status": "completed",
+                "output_text": "Direct output text response",
+                "usage": {"input_tokens": 7, "output_tokens": 12},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = GeminiProvider(api_key="gemini-key", client=client)
+    model = _dummy_model("google", "gemini-3.8-flash")
+
+    res = await provider.call("ping", model)
+    assert res["content"] == "Direct output text response"
+    assert res["prompt_tokens"] == 7
+    assert res["completion_tokens"] == 12
+
+
+@pytest.mark.asyncio
+async def test_gemini_conversation_history_mapping():
+    recorded_requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded_requests.append(request)
+        body = json.loads(request.content.decode("utf-8"))
+        assert "User: First question" in body["input"]
+        assert "Model: First answer" in body["input"]
+        assert "User: Follow-up question" in body["input"]
+        return httpx.Response(
+            200,
+            json={
+                "steps": [
+                    {
+                        "type": "model_output",
+                        "content": [{"type": "text", "text": "Multi-turn reply"}],
+                    }
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 10},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = GeminiProvider(api_key="gemini-key", client=client)
+    model = _dummy_model("google", "gemini-3.8-flash")
+
+    context = {
+        "messages": [
+            {"role": "user", "content": "First question"},
+            {"role": "assistant", "content": "First answer"},
+            {"role": "user", "content": "Follow-up question"},
+        ]
+    }
+    res = await provider.call("Follow-up question", model, context=context)
+    assert res["content"] == "Multi-turn reply"
 
 
 @pytest.mark.asyncio
@@ -280,28 +344,19 @@ async def test_gemini_generation_config_forwarded():
     def handler(request: httpx.Request) -> httpx.Response:
         recorded_requests.append(request)
         body = json.loads(request.content.decode("utf-8"))
-        assert "generationConfig" in body
-        assert body["generationConfig"] == {
-            "thinkingConfig": {
-                "thinkingLevel": "low"
-            }
-        }
+        assert "generation_config" in body
+        assert body["generation_config"]["temperature"] == 0.5
+        assert body["generation_config"]["thinking_level"] == "low"
         return httpx.Response(
             200,
             json={
-                "candidates": [
+                "steps": [
                     {
-                        "content": {
-                            "parts": [{"text": "pong"}],
-                            "role": "model",
-                        },
-                        "finishReason": "STOP",
+                        "type": "model_output",
+                        "content": [{"type": "text", "text": "pong"}],
                     }
                 ],
-                "usageMetadata": {
-                    "promptTokenCount": 5,
-                    "candidatesTokenCount": 2,
-                },
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2},
             },
         )
 
@@ -311,6 +366,7 @@ async def test_gemini_generation_config_forwarded():
 
     context = {
         "generation_config": {
+            "temperature": 0.5,
             "thinkingConfig": {
                 "thinkingLevel": "low"
             }
@@ -323,31 +379,73 @@ async def test_gemini_generation_config_forwarded():
 
 
 @pytest.mark.asyncio
-async def test_gemini_generation_config_omitted_when_absent_or_not_dict():
-    recorded_requests = []
+async def test_gemini_missing_output_and_usage_fields():
+    # 1. Missing output raises ProviderExecutionError
+    def empty_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"steps": []})
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        recorded_requests.append(request)
-        body = json.loads(request.content.decode("utf-8"))
-        assert "generationConfig" not in body
-        return httpx.Response(
-            200,
-            json={
-                "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
-            },
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx.AsyncClient(transport=httpx.MockTransport(empty_handler))
     provider = GeminiProvider(api_key="gemini-key", client=client)
     model = _dummy_model("google", "gemini-3.8-flash")
 
-    # Absent
-    await provider.call("ping", model, context=None)
-    assert len(recorded_requests) == 1
+    with pytest.raises(ProviderExecutionError, match="empty content"):
+        await provider.call("test", model)
 
-    # Not a dict
-    await provider.call("ping", model, context={"generation_config": "not-a-dict"})
-    assert len(recorded_requests) == 2
+    # 2. Missing usage fields defaults to 0 safely
+    def no_usage_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "steps": [
+                    {
+                        "type": "model_output",
+                        "content": [{"type": "text", "text": "Safe response"}],
+                    }
+                ]
+            },
+        )
+
+    client2 = httpx.AsyncClient(transport=httpx.MockTransport(no_usage_handler))
+    provider2 = GeminiProvider(api_key="gemini-key", client=client2)
+    res2 = await provider2.call("test", model)
+    assert res2["content"] == "Safe response"
+    assert res2["prompt_tokens"] == 0
+    assert res2["completion_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_gemini_http_errors_400_404_429():
+    # 400 Bad Request
+    def handler_400(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": "Invalid argument"}})
+
+    client_400 = httpx.AsyncClient(transport=httpx.MockTransport(handler_400))
+    provider_400 = GeminiProvider(api_key="key", client=client_400)
+    model = _dummy_model("google", "gemini-3.8-flash")
+    with pytest.raises(ProviderExecutionError, match="HTTP 400"):
+        await provider_400.call("test", model)
+
+    # 404 Not Found
+    def handler_404(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": {"message": "Model not found"}})
+
+    client_404 = httpx.AsyncClient(transport=httpx.MockTransport(handler_404))
+    provider_404 = GeminiProvider(api_key="key", client=client_404)
+    with pytest.raises(ProviderExecutionError, match="HTTP 404"):
+        await provider_404.call("test", model)
+
+    # 429 Rate Limit (retries exhausted)
+    calls_429 = 0
+    def handler_429(request: httpx.Request) -> httpx.Response:
+        nonlocal calls_429
+        calls_429 += 1
+        return httpx.Response(429, json={"error": {"message": "Rate limit exceeded"}})
+
+    client_429 = httpx.AsyncClient(transport=httpx.MockTransport(handler_429))
+    provider_429 = GeminiProvider(api_key="key", client=client_429, max_retries=1, retry_delay_seconds=0.0)
+    with pytest.raises(ProviderExecutionError, match="HTTP 429"):
+        await provider_429.call("test", model)
+    assert calls_429 == 2
 
 
 @pytest.mark.asyncio
@@ -362,22 +460,227 @@ async def test_smoke_test_gemini_supplies_low_thinking_level():
 
 
 @pytest.mark.asyncio
-async def test_gemini_blocked_prompt():
+async def test_gemini_interactions_none_output_text_with_valid_steps():
+    """Verify response with output_text=None but valid steps is safely parsed."""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             json={
-                "candidates": [],
-                "promptFeedback": {"blockReason": "SAFETY"},
+                "id": "int_789",
+                "status": "completed",
+                "output_text": None,
+                "steps": [
+                    {
+                        "type": "thought",
+                        "signature": "sig123",
+                    },
+                    {
+                        "type": "model_output",
+                        "content": [
+                            {"type": "text", "text": "GEMINI_OK"}
+                        ],
+                    },
+                ],
+                "usage": {"input_tokens": 12, "output_tokens": 4},
             },
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    provider = GeminiProvider(api_key="key", client=client)
-    model = _dummy_model("google", "gemini-1.5-pro")
+    provider = GeminiProvider(api_key="gemini-key", client=client)
+    model = _dummy_model("google", "gemini-3.8-flash")
 
-    with pytest.raises(ProviderExecutionError, match="blocked prompt with reason: SAFETY"):
-        await provider.call("harmful prompt", model)
+    res = await provider.call("ping", model)
+    assert res["content"] == "GEMINI_OK"
+    assert res["prompt_tokens"] == 12
+    assert res["completion_tokens"] == 4
+
+
+@pytest.mark.asyncio
+async def test_gemini_503_high_demand_recovers_on_retry():
+    """Verify HTTP 503 high-demand error triggers retry and recovers on subsequent attempt."""
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return httpx.Response(
+                503,
+                json={"error": {"message": "gemini-3.8-flash is currently experiencing high demand. Please try again later."}},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "status": "completed",
+                "steps": [
+                    {"type": "model_output", "content": [{"type": "text", "text": "Recovered after 503"}]}
+                ],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = GeminiProvider(
+        api_key="gemini-key",
+        client=client,
+        max_retries=1,
+        retry_delay_seconds=0.0,
+    )
+    model = _dummy_model("google", "gemini-3.8-flash")
+
+    res = await provider.call("ping", model)
+    assert res["content"] == "Recovered after 503"
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_gemini_retry_after_header_supported():
+    """Verify Retry-After header is captured on transient 503/429 errors."""
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(
+            503,
+            headers={"Retry-After": "2"},
+            json={"error": {"message": "Service unavailable"}},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = GeminiProvider(
+        api_key="gemini-key",
+        client=client,
+        max_retries=0,
+    )
+    model = _dummy_model("google", "gemini-3.8-flash")
+
+    caught = None
+    try:
+        await provider.call("ping", model)
+    except ProviderExecutionError as exc:
+        caught = exc
+
+    assert caught is not None
+    assert caught.status_code == 503
+    assert caught.retry_after == 2.0
+
+
+@pytest.mark.asyncio
+async def test_gemini_non_transient_errors_never_retried():
+    """Verify client errors (400, 401, 403, 404) are never retried even with max_retries > 0."""
+    call_counts = {}
+
+    def make_handler(status_code: int):
+        def handler(request: httpx.Request) -> httpx.Response:
+            call_counts[status_code] = call_counts.get(status_code, 0) + 1
+            return httpx.Response(status_code, json={"error": {"message": f"Client error {status_code}"}})
+        return handler
+
+    for code in (400, 401, 403, 404):
+        client = httpx.AsyncClient(transport=httpx.MockTransport(make_handler(code)))
+        provider = GeminiProvider(api_key="key", client=client, max_retries=3, retry_delay_seconds=0.0)
+        model = _dummy_model("google", "gemini-3.8-flash")
+        with pytest.raises(ProviderExecutionError, match=f"HTTP {code}"):
+            await provider.call("test", model)
+        assert call_counts[code] == 1, f"Expected exactly 1 call for HTTP {code}, got {call_counts[code]}"
+
+
+@pytest.mark.asyncio
+async def test_gemini_time_budget_exhaustion_aborts_retry():
+    """Verify retry is aborted when remaining time budget is insufficient."""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503, json={"error": {"message": "Temporarily overloaded"}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    # Configure timeout_seconds=1.0 with retry_delay_seconds=2.0 so attempt 1 runs,
+    # but the retry delay exceeds the remaining time budget
+    provider = GeminiProvider(
+        api_key="key",
+        client=client,
+        timeout_seconds=1.0,
+        max_retries=2,
+        retry_delay_seconds=2.0,
+    )
+    model = _dummy_model("google", "gemini-3.8-flash")
+
+    with pytest.raises(ProviderExecutionError):
+        await provider.call("test", model)
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_gemini_first_attempt_timeout_recovers_on_retry():
+    """Verify first-attempt timeout is retried and succeeds on second attempt within budget."""
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise httpx.ReadTimeout("Request timed out reading response")
+        return httpx.Response(
+            200,
+            json={
+                "status": "completed",
+                "steps": [
+                    {"type": "model_output", "content": [{"type": "text", "text": "Recovered after timeout"}]}
+                ],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = GeminiProvider(
+        api_key="gemini-key",
+        client=client,
+        timeout_seconds=30.0,
+        attempt_timeout_seconds=10.0,
+        max_retries=1,
+        retry_delay_seconds=0.0,
+    )
+    model = _dummy_model("google", "gemini-3.8-flash")
+
+    res = await provider.call("ping", model)
+    assert res["content"] == "Recovered after timeout"
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_gemini_reporting_of_underlying_timeout_type():
+    """Verify underlying timeout exception types (ReadTimeout, ConnectTimeout) are reported in cause_type."""
+    def read_timeout_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("Read timed out")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(read_timeout_handler))
+    provider = GeminiProvider(api_key="key", client=client, max_retries=0)
+    model = _dummy_model("google", "gemini-3.8-flash")
+
+    caught_read = None
+    try:
+        await provider.call("ping", model)
+    except ProviderExecutionError as exc:
+        caught_read = exc
+
+    assert caught_read is not None
+    assert caught_read.cause_type == "ReadTimeout"
+
+    def connect_timeout_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("Connect timed out")
+
+    client2 = httpx.AsyncClient(transport=httpx.MockTransport(connect_timeout_handler))
+    provider2 = GeminiProvider(api_key="key", client=client2, max_retries=0)
+
+    caught_connect = None
+    try:
+        await provider2.call("ping", model)
+    except ProviderExecutionError as exc:
+        caught_connect = exc
+
+    assert caught_connect is not None
+    assert caught_connect.cause_type == "ConnectTimeout"
 
 
 @pytest.mark.asyncio

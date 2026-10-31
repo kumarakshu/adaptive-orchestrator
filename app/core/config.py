@@ -73,6 +73,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("GEMINI_TIMEOUT_SECONDS", "gemini_timeout_seconds"),
         description="Timeout in seconds for Gemini API requests (falls back to DEFAULT_TIMEOUT_SECONDS if unset).",
     )
+    gemini_attempt_timeout_seconds: float = Field(
+        default=22.0,
+        validation_alias=AliasChoices("GEMINI_ATTEMPT_TIMEOUT_SECONDS", "gemini_attempt_timeout_seconds"),
+        description="Per-attempt HTTP timeout cap in seconds for Gemini API requests.",
+    )
     gemini_max_retries: int = Field(
         default=1,
         validation_alias=AliasChoices("GEMINI_MAX_RETRIES", "gemini_max_retries"),
@@ -80,6 +85,18 @@ class Settings(BaseSettings):
     )
     max_escalation_retries: int = Field(default=2, alias="MAX_ESCALATION_RETRIES")
     confidence_threshold: float = Field(default=0.75, alias="CONFIDENCE_THRESHOLD")
+
+    @field_validator("gemini_attempt_timeout_seconds", mode="before")
+    @classmethod
+    def _validate_attempt_timeout(cls, value: Any) -> float:
+        """Validate and bound per-attempt timeout between 1.0 and 60.0s."""
+        if value is None:
+            return 22.0
+        try:
+            val = float(value)
+            return max(1.0, min(val, 60.0))
+        except (ValueError, TypeError):
+            return 22.0
 
     @field_validator("cors_allowed_origins", mode="before")
     @classmethod

@@ -54,9 +54,15 @@ class BaseHTTPProvider(ModelProvider):
         headers: Dict[str, str],
         payload: Dict[str, Any],
         provider_name: str,
+        timeout_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Send an async POST request with safe error wrapping and credential masking."""
-        timeout = httpx.Timeout(self._timeout_seconds)
+        effective_timeout = (
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else float(self._timeout_seconds)
+        )
+        timeout = httpx.Timeout(effective_timeout)
 
         try:
             if self._client is not None:
@@ -74,12 +80,16 @@ class BaseHTTPProvider(ModelProvider):
                         json=payload,
                     )
         except httpx.TimeoutException as exc:
+            cause_type = type(exc).__name__
             raise ProviderExecutionError(
-                f"{provider_name} request timed out after {self._timeout_seconds}s."
+                f"{provider_name} request timed out after {effective_timeout:.1f}s ({cause_type}).",
+                cause_type=cause_type,
             ) from exc
         except httpx.RequestError as exc:
+            cause_type = type(exc).__name__
             raise ProviderExecutionError(
-                f"Network communication failure connecting to {provider_name}."
+                f"Network communication failure connecting to {provider_name} ({cause_type}).",
+                cause_type=cause_type,
             ) from exc
 
         if response.status_code >= 400:
@@ -98,8 +108,18 @@ class BaseHTTPProvider(ModelProvider):
             except Exception:
                 safe_detail = response.text[:200]
 
+            retry_after: Optional[float] = None
+            raw_retry_after = response.headers.get("retry-after")
+            if raw_retry_after:
+                try:
+                    retry_after = float(raw_retry_after)
+                except ValueError:
+                    pass
+
             raise ProviderExecutionError(
-                f"{provider_name} API returned error HTTP {status_code}: {safe_detail}"
+                f"{provider_name} API returned error HTTP {status_code}: {safe_detail}",
+                status_code=status_code,
+                retry_after=retry_after,
             )
 
         try:

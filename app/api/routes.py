@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.dependencies import (
     get_context_store,
+    get_model_executor,
     get_model_registry,
     get_orchestration_engine,
 )
@@ -23,6 +24,7 @@ from app.core.logging import get_logger
 from app.core.metrics import collector as metrics_collector
 from app.models.registry import ModelRegistry
 from app.orchestrator.engine import OrchestrationEngine
+from app.orchestrator.executor import ModelExecutor
 
 router = APIRouter()
 settings = get_settings()
@@ -57,9 +59,11 @@ async def health_check() -> HealthResponse:
 )
 async def list_models(
     registry: ModelRegistry = Depends(get_model_registry),
+    executor: ModelExecutor = Depends(get_model_executor),
 ) -> List[ModelInfoResponse]:
     """Retrieve all models registered in the orchestration registry without exposing credentials."""
     models = registry.list_all()
+    active_providers = set(executor.list_providers())
     return [
         ModelInfoResponse(
             model_id=m.model_id,
@@ -67,7 +71,7 @@ async def list_models(
             tier=m.tier.value,
             supported_capabilities=m.supported_capabilities,
             context_window=m.context_window,
-            enabled=m.enabled,
+            enabled=bool(m.enabled and (m.provider.lower() in active_providers if active_providers else m.enabled)),
         )
         for m in models
     ]

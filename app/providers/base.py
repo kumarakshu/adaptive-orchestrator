@@ -35,6 +35,11 @@ class BaseHTTPProvider(ModelProvider):
         """Check whether an API key has been configured."""
         return self._api_key is not None
 
+    @property
+    def timeout_seconds(self) -> float:
+        """Configured request timeout in seconds."""
+        return self._timeout_seconds
+
     def _ensure_api_key(self, provider_name: str) -> str:
         """Verify API key is configured without exposing any secret values."""
         if not self._api_key:

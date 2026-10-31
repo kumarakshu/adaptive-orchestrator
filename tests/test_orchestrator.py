@@ -551,3 +551,81 @@ async def test_backward_compatible_when_task_id_omitted(mock_registry: ModelRegi
     assert len(store._checkpoints) == 0
 
 
+@pytest.mark.asyncio
+async def test_orchestration_gemini_only_fails_gracefully_without_escalating_to_unconfigured():
+    """Verify engine with only Google/Gemini configured fails gracefully without attempting unconfigured OpenAI/Anthropic."""
+    # Use real ModelRegistry with all standard models
+    registry = ModelRegistry.with_default_models()
+    executor = ModelExecutor()
+
+    call_records = []
+
+    async def mock_failing_gemini(prompt: str, model, context=None):
+        call_records.append((model.provider, model.model_id))
+        raise RuntimeError("Gemini request timed out after 30s")
+
+    executor.register_provider("google", mock_failing_gemini)
+    store = InMemoryContextStore()
+
+    engine = OrchestrationEngine(
+        registry=registry,
+        executor=executor,
+        context_store=store,
+    )
+
+    result = await engine.orchestrate(
+        prompt="Explain quantum physics",
+        task_id="task-gemini-fail-1",
+    )
+
+    assert result.success is False
+    # Ensure ONLY google was called, never openai or anthropic
+    for provider, model_id in call_records:
+        assert provider == "google", f"Unexpected call to unconfigured provider {provider} ({model_id})"
+
+    # Verify no unconfigured model was escalated to
+    assert "No configured fallback models available in higher tiers" in result.error
+
+    # Verify checkpoint is marked failed
+    cp = await store.get_checkpoint("task-gemini-fail-1")
+    assert cp["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_failed_task_checkpoint_cannot_be_rerun_requires_fresh_task_id(mock_registry: ModelRegistry):
+    """Verify terminally failed tasks cannot be rerun with the same task_id."""
+    store = InMemoryContextStore()
+    await store.save_checkpoint("task-failed-prior", {
+        "task_id": "task-failed-prior",
+        "status": "failed",
+        "prompt": "Broken query",
+        "attempt_count": 2,
+        "attempted_model_ids": ["mock-fast-model"],
+        "checkpoint_version": 1,
+        "updated_at": 100.0,
+        "error": "Original fatal failure",
+    })
+
+    def failing_provider(prompt, model, context=None):
+        raise AssertionError("Executor should never be called for already-failed task!")
+
+    executor = ModelExecutor()
+    executor.register_provider("mock-provider", failing_provider)
+
+    engine = OrchestrationEngine(
+        registry=mock_registry,
+        executor=executor,
+        context_store=store,
+    )
+
+    result = await engine.orchestrate(
+        prompt="Broken query",
+        task_id="task-failed-prior",
+    )
+
+    assert result.success is False
+    assert "A fresh task_id is required" in result.error
+    assert result.metadata.get("resumed_from_checkpoint") is True
+
+
+

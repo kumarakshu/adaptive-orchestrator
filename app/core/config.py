@@ -68,6 +68,16 @@ class Settings(BaseSettings):
 
     # Orchestrator Policies
     default_timeout_seconds: int = Field(default=30, alias="DEFAULT_TIMEOUT_SECONDS")
+    gemini_timeout_seconds: Optional[float] = Field(
+        default=None,
+        validation_alias=AliasChoices("GEMINI_TIMEOUT_SECONDS", "gemini_timeout_seconds"),
+        description="Timeout in seconds for Gemini API requests (falls back to DEFAULT_TIMEOUT_SECONDS if unset).",
+    )
+    gemini_max_retries: int = Field(
+        default=1,
+        validation_alias=AliasChoices("GEMINI_MAX_RETRIES", "gemini_max_retries"),
+        description="Maximum transient retries for Gemini requests (bounded).",
+    )
     max_escalation_retries: int = Field(default=2, alias="MAX_ESCALATION_RETRIES")
     confidence_threshold: float = Field(default=0.75, alias="CONFIDENCE_THRESHOLD")
 

@@ -1,11 +1,15 @@
 """Google Gemini provider adapter for Adaptive LLM Orchestrator."""
 
+import asyncio
 from typing import Any, Dict, List, Optional, Union
 import httpx
 
+from app.core.logging import get_logger
 from app.models.registry import ModelDescriptor
 from app.orchestrator.executor import ExecutionResult, ProviderExecutionError
 from app.providers.base import BaseHTTPProvider
+
+logger = get_logger("provider.gemini")
 
 
 class GeminiProvider(BaseHTTPProvider):
@@ -19,6 +23,8 @@ class GeminiProvider(BaseHTTPProvider):
         client: Optional[httpx.AsyncClient] = None,
         timeout_seconds: float = 30.0,
         base_url: Optional[str] = None,
+        max_retries: int = 1,
+        retry_delay_seconds: float = 1.0,
     ) -> None:
         super().__init__(
             api_key=api_key,
@@ -26,6 +32,8 @@ class GeminiProvider(BaseHTTPProvider):
             timeout_seconds=timeout_seconds,
         )
         self._base_url = (base_url or self.DEFAULT_BASE_URL).rstrip("/")
+        self._max_retries = max(0, min(int(max_retries), 3))
+        self._retry_delay_seconds = max(0.0, min(float(retry_delay_seconds), 5.0))
 
     async def call(
         self,
@@ -68,12 +76,37 @@ class GeminiProvider(BaseHTTPProvider):
 
         url = f"{self._base_url}/{model.model_id}:generateContent"
 
-        data = await self._send_request(
-            url=url,
-            headers=headers,
-            payload=payload,
-            provider_name="Google Gemini",
-        )
+        attempt = 0
+        while True:
+            try:
+                data = await self._send_request(
+                    url=url,
+                    headers=headers,
+                    payload=payload,
+                    provider_name="Google Gemini",
+                )
+                break
+            except ProviderExecutionError as exc:
+                err_str = str(exc).lower()
+                is_transient = (
+                    "timed out" in err_str
+                    or "network communication failure" in err_str
+                    or "http 429" in err_str
+                    or "http 503" in err_str
+                    or "http 500" in err_str
+                    or "http 502" in err_str
+                    or "http 504" in err_str
+                )
+                if attempt < self._max_retries and is_transient:
+                    attempt += 1
+                    logger.warning(
+                        "Google Gemini request failed with transient error; retrying attempt %d of %d...",
+                        attempt,
+                        self._max_retries,
+                    )
+                    await asyncio.sleep(self._retry_delay_seconds)
+                    continue
+                raise exc
 
         try:
             candidates = data.get("candidates", [])

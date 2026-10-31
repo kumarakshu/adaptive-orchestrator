@@ -65,3 +65,71 @@ def test_escalation_decision(tiered_registry: ModelRegistry):
     assert decision.next_model is not None
     assert decision.next_model.model_id == "tier-2"
 
+
+def test_escalation_skips_unavailable_providers():
+    """Verify escalation never selects a model whose provider is unconfigured."""
+    from app.orchestrator.executor import ModelExecutor
+
+    registry = ModelRegistry()
+    registry.register(ModelDescriptor(model_id="gemini-flash", provider="google", tier=ModelTier.LIGHTWEIGHT))
+    registry.register(ModelDescriptor(model_id="gpt-4o", provider="openai", tier=ModelTier.BALANCED))
+    registry.register(ModelDescriptor(model_id="o1", provider="openai", tier=ModelTier.ADVANCED))
+
+    # Only Google is configured in the executor
+    executor = ModelExecutor()
+    executor.register_provider("google", lambda prompt, model: "OK")
+
+    manager = EscalationManager(registry=registry, executor=executor)
+    current_model = registry.get("gemini-flash")
+
+    validation_failure = ValidationResult(
+        is_valid=False,
+        confidence_score=0.1,
+        requires_escalation=True,
+        rejection_reasons=["Upstream timeout"],
+    )
+
+    decision = manager.decide_escalation(
+        current_model=current_model,
+        validation=validation_failure,
+        attempt_count=0,
+    )
+
+    # Must NOT escalate to gpt-4o or o1
+    assert decision.should_escalate is False
+    assert decision.next_model is None
+    assert "No configured fallback" in decision.reason
+
+
+def test_escalation_skips_intermediate_tier_if_unconfigured():
+    """Verify escalation skips an unconfigured tier if a higher tier has an available provider."""
+    from app.orchestrator.executor import ModelExecutor
+
+    registry = ModelRegistry()
+    registry.register(ModelDescriptor(model_id="gemini-flash", provider="google", tier=ModelTier.LIGHTWEIGHT))
+    registry.register(ModelDescriptor(model_id="gpt-4o", provider="openai", tier=ModelTier.BALANCED))
+    registry.register(ModelDescriptor(model_id="gemini-pro-adv", provider="google", tier=ModelTier.ADVANCED))
+
+    executor = ModelExecutor()
+    executor.register_provider("google", lambda prompt, model: "OK")
+
+    manager = EscalationManager(registry=registry, executor=executor)
+    current_model = registry.get("gemini-flash")
+
+    validation_failure = ValidationResult(
+        is_valid=False,
+        confidence_score=0.1,
+        requires_escalation=True,
+    )
+
+    decision = manager.decide_escalation(
+        current_model=current_model,
+        validation=validation_failure,
+        attempt_count=0,
+    )
+
+    # Skips unconfigured BALANCED tier (gpt-4o) and selects ADVANCED tier (gemini-pro-adv)
+    assert decision.should_escalate is True
+    assert decision.next_model is not None
+    assert decision.next_model.model_id == "gemini-pro-adv"
+

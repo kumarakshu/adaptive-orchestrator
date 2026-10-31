@@ -38,10 +38,21 @@ def create_configured_providers(
         )
 
     if cfg.gemini_api_key and cfg.gemini_api_key.strip():
+        gemini_timeout = (
+            float(cfg.gemini_timeout_seconds)
+            if cfg.gemini_timeout_seconds is not None
+            else timeout
+        )
+        gemini_retries = (
+            int(cfg.gemini_max_retries)
+            if getattr(cfg, "gemini_max_retries", None) is not None
+            else 1
+        )
         providers["google"] = GeminiProvider(
             api_key=cfg.gemini_api_key,
             client=client,
-            timeout_seconds=timeout,
+            timeout_seconds=gemini_timeout,
+            max_retries=gemini_retries,
         )
 
     return providers

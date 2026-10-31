@@ -55,9 +55,10 @@ async def get_prompt_analyzer() -> PromptAnalyzer:
 async def get_intelligent_router(
     registry: ModelRegistry = Depends(get_model_registry),
     analyzer: PromptAnalyzer = Depends(get_prompt_analyzer),
+    executor: ModelExecutor = Depends(get_model_executor),
 ) -> IntelligentRouter:
-    """Return an IntelligentRouter instance with current registry."""
-    return IntelligentRouter(registry=registry, analyzer=analyzer)
+    """Return an IntelligentRouter instance with current registry and configured executor."""
+    return IntelligentRouter(registry=registry, analyzer=analyzer, executor=executor)
 
 
 async def get_context_store() -> BaseContextStore:

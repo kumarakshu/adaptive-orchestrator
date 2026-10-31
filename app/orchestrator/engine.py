@@ -69,20 +69,30 @@ class OrchestrationEngine:
         self.registry = registry
         self.executor = executor
         self.analyzer = analyzer or PromptAnalyzer()
-        self.router = router or IntelligentRouter(registry=registry, analyzer=self.analyzer)
+        self.router = router or IntelligentRouter(
+            registry=registry,
+            analyzer=self.analyzer,
+            executor=self.executor,
+        )
+        if self.executor is not None and hasattr(self.router, "executor") and self.router.executor is None:
+            self.router.executor = self.executor
+
         self.validator = validator or ResponseValidator()
         self.context_store = context_store
         if escalation is not None:
             self.escalation = escalation
+            if self.executor is not None and hasattr(self.escalation, "executor") and self.escalation.executor is None:
+                self.escalation.executor = self.executor
         else:
             try:
                 settings = get_settings()
                 self.escalation = EscalationManager(
                     registry=registry,
                     max_retries=settings.max_escalation_retries,
+                    executor=self.executor,
                 )
             except Exception:
-                self.escalation = EscalationManager(registry=registry)
+                self.escalation = EscalationManager(registry=registry, executor=self.executor)
 
     async def orchestrate(
         self,
@@ -170,7 +180,10 @@ class OrchestrationEngine:
                 analysis=analysis,
                 routing=None,
                 execution=None,
-                error=existing_cp.get("last_error", "Task previously failed terminally."),
+                error=existing_cp.get(
+                    "last_error",
+                    "Task previously reached terminal failure. A fresh task_id is required for a new execution attempt.",
+                ),
                 metadata={
                     **opts.get("metadata", {}),
                     "task_id": valid_task_id,
@@ -427,8 +440,13 @@ class OrchestrationEngine:
             # Deduplication: ensure candidate has not already been attempted in this request
             next_model = decision.next_model
             if next_model.model_id in attempted_model_ids:
-                tier_candidates = self.registry.list_by_tier(next_model.tier)
-                untried = [c for c in tier_candidates if c.model_id not in attempted_model_ids]
+                tier_candidates = self.registry.list_by_tier(next_model.tier, only_enabled=True)
+                untried = [
+                    c for c in tier_candidates
+                    if c.model_id not in attempted_model_ids
+                    and c.enabled
+                    and (not hasattr(self.escalation, "is_provider_available") or self.escalation.is_provider_available(c.provider))
+                ]
                 if untried:
                     next_model = untried[0]
                 else:
@@ -480,7 +498,12 @@ class OrchestrationEngine:
         # Failure outcome when all attempts / tiers are exhausted
         error_msg = None
         if last_execution_result and last_execution_result.error:
-            error_msg = last_execution_result.error
+            if decision.reason and ("No configured" in decision.reason or "No models" in decision.reason or "highest" in decision.reason):
+                error_msg = f"{last_execution_result.error} ({decision.reason})"
+            else:
+                error_msg = last_execution_result.error
+        elif decision.reason:
+            error_msg = f"Escalation halted: {decision.reason}"
         elif last_validation_result and last_validation_result.rejection_reasons:
             error_msg = "; ".join(last_validation_result.rejection_reasons)
         else:

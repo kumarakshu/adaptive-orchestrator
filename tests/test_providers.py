@@ -477,3 +477,80 @@ def test_factory_all_configured():
     registered = register_configured_providers(executor, settings=settings)
     assert set(registered) == {"openai", "anthropic", "google"}
     assert set(executor.list_providers()) == {"openai", "anthropic", "google"}
+
+
+def test_factory_gemini_custom_timeout_and_retries():
+    settings = Settings(
+        GEMINI_API_KEY="sk-gemini",
+        GEMINI_TIMEOUT_SECONDS=45.0,
+        GEMINI_MAX_RETRIES=2,
+    )
+    providers = create_configured_providers(settings=settings)
+    assert "google" in providers
+    gemini_p = providers["google"]
+    assert isinstance(gemini_p, GeminiProvider)
+    assert gemini_p.timeout_seconds == 45.0
+    assert gemini_p.max_retries == 2
+
+
+@pytest.mark.asyncio
+async def test_gemini_transient_retry_succeeds():
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise httpx.ReadTimeout("Request timed out")
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [{"text": "Recovered response"}],
+                            "role": "model",
+                        },
+                        "finishReason": "STOP",
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 5},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = GeminiProvider(
+        api_key="gemini-key",
+        client=client,
+        max_retries=1,
+        retry_delay_seconds=0.0,
+    )
+    model = _dummy_model("google", "gemini-3.8-flash")
+
+    res = await provider.call("Test prompt", model)
+    assert res["content"] == "Recovered response"
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_gemini_transient_retry_exhausted_raises():
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(503, json={"error": {"message": "Service unavailable"}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = GeminiProvider(
+        api_key="gemini-key",
+        client=client,
+        max_retries=1,
+        retry_delay_seconds=0.0,
+    )
+    model = _dummy_model("google", "gemini-3.8-flash")
+
+    with pytest.raises(ProviderExecutionError, match="HTTP 503"):
+        await provider.call("Test prompt", model)
+    assert call_count == 2
+

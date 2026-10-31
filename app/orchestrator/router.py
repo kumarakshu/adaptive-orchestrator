@@ -5,7 +5,7 @@ task category, capability requirements, context window limits, and availability.
 Does not invoke external LLM provider APIs.
 """
 
-from typing import List, Optional, Union
+from typing import Any, Iterable, List, Optional, Set, Union
 from pydantic import BaseModel, Field
 
 from app.models.registry import ModelDescriptor, ModelRegistry, ModelTier
@@ -99,10 +99,28 @@ class IntelligentRouter:
         self,
         registry: ModelRegistry,
         analyzer: Optional[PromptAnalyzer] = None,
+        executor: Optional[Any] = None,
+        available_providers: Optional[Iterable[str]] = None,
     ) -> None:
-        """Initialize router with a model registry and an optional prompt analyzer."""
+        """Initialize router with a model registry, optional prompt analyzer, and provider filter."""
         self.registry = registry
         self.analyzer = analyzer or PromptAnalyzer()
+        self.executor = executor
+        self._available_providers = (
+            {p.lower() for p in available_providers}
+            if available_providers is not None
+            else None
+        )
+
+    def is_provider_available(self, provider_name: str) -> bool:
+        """Check whether a provider is configured and available for routing."""
+        if self._available_providers is not None:
+            return provider_name.lower() in self._available_providers
+        if self.executor is not None and hasattr(self.executor, "list_providers"):
+            configured = self.executor.list_providers()
+            if configured:
+                return self.executor.has_provider(provider_name.lower())
+        return True
 
     def select_tier(self, analysis: AnalysisResult) -> ModelTier:
         """Determine initial preferred ModelTier from query analysis signals.
@@ -224,10 +242,12 @@ class IntelligentRouter:
             # Query registry for enabled models in this tier
             tier_models = self.registry.get_models_by_tier(candidate_tier, only_enabled=True)
 
-            # Filter candidates that can accommodate context window
+            # Filter candidates that have configured providers and can accommodate context window
             eligible_models = [
                 m for m in tier_models
-                if m.context_window >= analysis_result.estimated_input_tokens
+                if m.enabled
+                and self.is_provider_available(m.provider)
+                and m.context_window >= analysis_result.estimated_input_tokens
             ]
 
             # Filter candidates that satisfy any mandatory capabilities

@@ -268,3 +268,26 @@ async def test_route_async_interface(configured_registry: ModelRegistry):
     assert isinstance(decision, RoutingDecision)
     assert decision.selected_tier == ModelTier.LIGHTWEIGHT
     assert decision.model_id == "mock-lightweight"
+
+
+def test_router_gemini_only_provider_excludes_others():
+    """Verify that when only Google/Gemini is configured, OpenAI/Anthropic are excluded."""
+    from app.orchestrator.executor import ModelExecutor
+
+    registry = ModelRegistry.with_default_models()
+    executor = ModelExecutor()
+    executor.register_provider("google", lambda prompt, model, context=None: "Gemini response")
+
+    router = IntelligentRouter(registry=registry, executor=executor)
+
+    # 1. Simple query routes to Gemini
+    decision_simple = router.route("Simple question")
+    assert decision_simple.model.provider == "google"
+    assert decision_simple.model_id == "gemini-3.8-flash"
+
+    # 2. Complex query prefers ADVANCED (which has only openai/anthropic in defaults)
+    # Router must fall back to the available Gemini model in lightweight tier
+    decision_complex = router.route("Very complex coding task with reasoning steps")
+    assert decision_complex.model.provider == "google"
+    assert decision_complex.model_id == "gemini-3.8-flash"
+    assert decision_complex.fallback_used is True

@@ -109,8 +109,18 @@ async def chat_endpoint(
             variables = stored_data.get("variables", {})
             effective_context = {**variables, **effective_context}
             effective_context["history"] = list(stored_turns)
+            effective_context["messages"] = list(stored_turns)
+            effective_context["turns"] = list(stored_turns)
         except Exception as exc:
             logger.warning("Failed to load context for session: %s", type(exc).__name__)
+
+    active_backend = await context_store.get_active_backend()
+    turns_used = len(
+        effective_context.get("history")
+        or effective_context.get("messages")
+        or effective_context.get("turns")
+        or []
+    )
 
     result = await engine.orchestrate(
         prompt=request.prompt,
@@ -153,6 +163,11 @@ async def chat_endpoint(
         error=result.error,
         task_id=request.task_id,
         checkpoint_status=result.metadata.get("checkpoint_status"),
+        cached=bool(result.metadata.get("cached", False)),
+        cache_status=result.metadata.get("cache_status", "MISS"),
+        context_backend=active_backend,
+        context_turns_used=turns_used,
+        cache_saved_tokens=result.metadata.get("cache_saved_tokens"),
         metadata=result.metadata,
     )
 

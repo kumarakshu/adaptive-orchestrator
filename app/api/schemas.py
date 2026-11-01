@@ -70,6 +70,11 @@ class ChatResponse(BaseModel):
     error: Optional[str] = Field(default=None, description="Error message if processing failed")
     task_id: Optional[str] = Field(default=None, description="Task identifier if checkpointing was requested")
     checkpoint_status: Optional[str] = Field(default=None, description="Task checkpoint status if checkpointing was used")
+    cached: bool = Field(default=False, description="Whether the response was served from cache")
+    cache_status: Optional[str] = Field(default="MISS", description="Response cache status ('HIT' or 'MISS')")
+    context_backend: Optional[str] = Field(default=None, description="Active context storage backend ('redis' or 'in_memory')")
+    context_turns_used: int = Field(default=0, description="Number of conversation history turns passed to model")
+    cache_saved_tokens: Optional[int] = Field(default=None, description="Estimated tokens saved by cache hit")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional context or telemetry")
 
 

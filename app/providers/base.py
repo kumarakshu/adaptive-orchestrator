@@ -147,16 +147,22 @@ class BaseHTTPProvider(ModelProvider):
             if "system_prompt" in context and isinstance(context["system_prompt"], str):
                 system_prompt = context["system_prompt"]
 
-            raw_messages = context.get("messages")
+            raw_messages = (
+                context.get("messages")
+                or context.get("history")
+                or context.get("turns")
+            )
             if isinstance(raw_messages, list):
                 for m in raw_messages:
-                    if isinstance(m, dict) and "role" in m and "content" in m:
-                        role = str(m["role"]).lower()
+                    if isinstance(m, dict) and "content" in m:
+                        raw_role = str(m.get("role", "user")).lower()
                         content = str(m["content"])
-                        if role == "system" and not system_prompt:
+                        if raw_role == "system" and not system_prompt:
                             system_prompt = content
-                        elif role in ("user", "assistant", "model"):
-                            messages.append({"role": role, "content": content})
+                        elif raw_role in ("user", "human"):
+                            messages.append({"role": "user", "content": content})
+                        elif raw_role in ("assistant", "model", "bot", "ai"):
+                            messages.append({"role": "assistant", "content": content})
 
         # Append current user prompt if not already present as the last message
         if not messages or messages[-1].get("content") != prompt:

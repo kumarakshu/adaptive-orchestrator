@@ -14,6 +14,7 @@ Concurrency & Architectural Limitations:
 
 from abc import ABC, abstractmethod
 import asyncio
+import hashlib
 import json
 import re
 import time
@@ -35,8 +36,68 @@ def is_safe_id(identifier: Optional[str]) -> bool:
     return bool(SAFE_ID_PATTERN.match(identifier.strip()))
 
 
+def compute_response_cache_key(
+    model_id: str,
+    prompt: str,
+    context: Optional[Dict[str, Any]] = None,
+    options: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Generate a deterministic SHA-256 cache key for model responses.
+
+    Includes model identifier, normalized prompt, relevant conversation turns/variables,
+    and generation options to ensure exact cache isolation between users and sessions.
+    """
+    normalized_prompt = prompt.strip()
+
+    context_str = ""
+    if context and isinstance(context, dict):
+        relevant: Dict[str, Any] = {}
+        for k in ("messages", "history", "turns", "system_prompt", "generation_config"):
+            if k in context and context[k]:
+                relevant[k] = context[k]
+        if relevant:
+            context_str = json.dumps(relevant, sort_keys=True)
+
+    opts_str = ""
+    if options and isinstance(options, dict):
+        relevant_opts: Dict[str, Any] = {}
+        for k in ("temperature", "max_tokens", "thinking_level", "expected_format"):
+            if k in options and options[k] is not None:
+                relevant_opts[k] = options[k]
+        if relevant_opts:
+            opts_str = json.dumps(relevant_opts, sort_keys=True)
+
+    key_material = f"{model_id.lower()}:::{normalized_prompt}:::{context_str}:::{opts_str}"
+    return hashlib.sha256(key_material.encode("utf-8")).hexdigest()
+
+
 class BaseContextStore(ABC):
     """Abstract interface for session and conversation context persistence."""
+
+    @property
+    @abstractmethod
+    def backend_name(self) -> str:
+        """Name of active storage backend ('redis' or 'in_memory')."""
+        pass
+
+    async def get_active_backend(self) -> str:
+        """Probe and return the functioning backend ('redis' or 'in_memory')."""
+        return self.backend_name
+
+    @abstractmethod
+    async def get_cached_response(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        """Retrieve cached model execution result if present and unexpired."""
+        pass
+
+    @abstractmethod
+    async def save_cached_response(
+        self,
+        cache_key: str,
+        data: Dict[str, Any],
+        ttl_seconds: Optional[int] = None,
+    ) -> None:
+        """Persist successful model execution result in cache."""
+        pass
 
     @abstractmethod
     async def get_context(self, context_id: str) -> Dict[str, Any]:
@@ -112,10 +173,46 @@ class InMemoryContextStore(BaseContextStore):
         self._store: Dict[str, Tuple[Dict[str, Any], Optional[float]]] = {}
         # task_id -> (checkpoint_dict, expire_timestamp_or_none)
         self._checkpoints: Dict[str, Tuple[Dict[str, Any], Optional[float]]] = {}
+        # cache_key -> (response_dict, expire_timestamp_or_none)
+        self._response_cache: Dict[str, Tuple[Dict[str, Any], Optional[float]]] = {}
         self._lock = asyncio.Lock()
+
+    @property
+    def backend_name(self) -> str:
+        return "in_memory"
+
+    async def get_active_backend(self) -> str:
+        return "in_memory"
 
     def _is_expired(self, expiry: Optional[float]) -> bool:
         return expiry is not None and time.time() > expiry
+
+    async def get_cached_response(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        if not cache_key:
+            return None
+        async with self._lock:
+            entry = self._response_cache.get(cache_key)
+            if entry is None:
+                return None
+            data, expiry = entry
+            if self._is_expired(expiry):
+                del self._response_cache[cache_key]
+                return None
+            return json.loads(json.dumps(data))
+
+    async def save_cached_response(
+        self,
+        cache_key: str,
+        data: Dict[str, Any],
+        ttl_seconds: Optional[int] = None,
+    ) -> None:
+        if not cache_key or not isinstance(data, dict):
+            return
+        ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl
+        expiry = time.time() + ttl if ttl > 0 else None
+        clean_data = json.loads(json.dumps(sanitize_data(data)))
+        async with self._lock:
+            self._response_cache[cache_key] = (clean_data, expiry)
 
     async def get_context(self, context_id: str) -> Dict[str, Any]:
         if not context_id:
@@ -220,6 +317,7 @@ class InMemoryContextStore(BaseContextStore):
         async with self._lock:
             self._store.clear()
             self._checkpoints.clear()
+            self._response_cache.clear()
 
 
 class RedisContextStore(BaseContextStore):
@@ -236,19 +334,93 @@ class RedisContextStore(BaseContextStore):
         default_ttl_seconds: int = 86400,
         key_prefix: str = "orchestrator:context:",
         checkpoint_key_prefix: str = "orchestrator:checkpoint:",
+        cache_key_prefix: str = "orchestrator:response_cache:",
     ) -> None:
         self.redis_url = redis_url
         self.default_ttl = default_ttl_seconds
         self.key_prefix = key_prefix
         self.checkpoint_key_prefix = checkpoint_key_prefix
+        self.cache_key_prefix = cache_key_prefix
         self._client: Optional[Any] = None
         self._fallback = InMemoryContextStore(default_ttl_seconds=default_ttl_seconds)
+
+    @property
+    def backend_name(self) -> str:
+        return "redis"
+
+    async def get_active_backend(self) -> str:
+        client = await self._get_client()
+        if client is not None:
+            try:
+                await client.ping()
+                return "redis"
+            except Exception:
+                return "in_memory"
+        return "in_memory"
 
     def _make_key(self, context_id: str) -> str:
         return f"{self.key_prefix}{context_id}"
 
     def _make_checkpoint_key(self, task_id: str) -> str:
         return f"{self.checkpoint_key_prefix}{task_id}"
+
+    def _make_cache_key(self, cache_key: str) -> str:
+        return f"{self.cache_key_prefix}{cache_key}"
+
+    async def get_cached_response(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        if not cache_key:
+            return None
+        client = await self._get_client()
+        if client is None:
+            return await self._fallback.get_cached_response(cache_key)
+
+        try:
+            key = self._make_cache_key(cache_key)
+            raw = await client.get(key)
+            if not raw:
+                return await self._fallback.get_cached_response(cache_key)
+            try:
+                return json.loads(raw)
+            except Exception as json_err:
+                logger.warning("Corrupted cached response JSON in Redis: %s", type(json_err).__name__)
+                return None
+        except Exception as exc:
+            logger.warning(
+                "Redis get_cached_response failed; falling back to in-memory store. Error: %s",
+                type(exc).__name__,
+            )
+            return await self._fallback.get_cached_response(cache_key)
+
+    async def save_cached_response(
+        self,
+        cache_key: str,
+        data: Dict[str, Any],
+        ttl_seconds: Optional[int] = None,
+    ) -> None:
+        if not cache_key or not isinstance(data, dict):
+            return
+        ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl
+        sanitized = sanitize_data(data)
+        payload = json.dumps(sanitized)
+
+        # Mirror in fallback store
+        await self._fallback.save_cached_response(cache_key, sanitized, ttl_seconds=ttl)
+
+        client = await self._get_client()
+        if client is None:
+            return
+
+        try:
+            key = self._make_cache_key(cache_key)
+            if ttl > 0:
+                await client.set(key, payload, ex=ttl)
+            else:
+                await client.set(key, payload)
+        except Exception as exc:
+            logger.warning(
+                "Redis save_cached_response failed; preserved in-memory only. Error: %s",
+                type(exc).__name__,
+            )
 
     async def _get_client(self) -> Optional[Any]:
         """Lazy-initialize async Redis client."""

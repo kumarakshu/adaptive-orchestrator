@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
-from app.core.context import BaseContextStore, CHECKPOINT_VERSION, is_safe_id
+from app.core.context import BaseContextStore, CHECKPOINT_VERSION, compute_response_cache_key, is_safe_id
 from app.core.logging import get_logger
 from app.models.registry import ModelRegistry, ModelTier
 from app.orchestrator.analyzer import AnalysisResult, PromptAnalyzer
@@ -325,6 +325,73 @@ class OrchestrationEngine:
         last_execution_result: Optional[ExecutionResult] = None
         last_validation_result: Optional[ValidationResult] = None
 
+        # Check response cache if enabled and store is available (only for fresh requests)
+        settings = get_settings()
+        if settings.response_cache_enabled and store and not is_resuming:
+            initial_cache_key = compute_response_cache_key(
+                model_id=current_model.model_id,
+                prompt=cleaned_prompt,
+                context=context,
+                options=opts,
+            )
+            try:
+                cached_payload = await store.get_cached_response(initial_cache_key)
+                if cached_payload and isinstance(cached_payload, dict):
+                    prompt_toks = cached_payload.get("prompt_tokens") or 0
+                    comp_toks = cached_payload.get("completion_tokens") or 0
+                    saved_tokens = prompt_toks + comp_toks
+                    if saved_tokens == 0:
+                        saved_tokens = max(1, (len(cleaned_prompt) // 4) + (len(str(cached_payload.get("content", ""))) // 4))
+
+                    cached_execution = ExecutionResult(
+                        content=cached_payload.get("content", ""),
+                        model_id=cached_payload.get("model_id", current_model.model_id),
+                        success=True,
+                        prompt_tokens=prompt_toks,
+                        completion_tokens=comp_toks,
+                        latency_ms=cached_payload.get("latency_ms", 1.0),
+                        raw_response=cached_payload.get("raw_response"),
+                    )
+
+                    await _save_cp(
+                        status="completed",
+                        attempt_count=0,
+                        attempted_model_ids=list(attempted_model_ids),
+                        escalation_history=[],
+                        last_model_id=current_model.model_id,
+                        result={
+                            "content": cached_execution.content,
+                            "model_id": cached_execution.model_id,
+                            "selected_tier": current_model.tier.value,
+                            "prompt_tokens": prompt_toks,
+                            "completion_tokens": comp_toks,
+                            "latency_ms": cached_execution.latency_ms,
+                        },
+                    )
+
+                    logger.info("Serving cached response for model %s (key=%s)", current_model.model_id, initial_cache_key[:8])
+                    return OrchestrationResult(
+                        success=True,
+                        prompt=cleaned_prompt,
+                        analysis=analysis_result,
+                        routing=current_routing,
+                        execution=cached_execution,
+                        error=None,
+                        metadata={
+                            **opts.get("metadata", {}),
+                            "cached": True,
+                            "cache_status": "HIT",
+                            "cache_saved_tokens": saved_tokens,
+                            "cache_key": initial_cache_key,
+                            "attempt_count": 0,
+                            "escalation_history": [],
+                            "escalated": False,
+                            **({"task_id": valid_task_id, "checkpoint_status": "completed"} if valid_task_id else {}),
+                        },
+                    )
+            except Exception as cache_read_err:
+                logger.warning("Error reading response cache: %s", type(cache_read_err).__name__)
+
         while True:
             # Save checkpoint transition: Executing model attempt
             await _save_cp(
@@ -394,6 +461,30 @@ class OrchestrationEngine:
 
             # Success condition: execution succeeded, validation passed, and no escalation demanded
             if execution_result.success and validation_result.is_valid and not validation_result.requires_escalation:
+                # Save successful execution to response cache if enabled
+                if settings.response_cache_enabled and store:
+                    try:
+                        save_cache_key = compute_response_cache_key(
+                            model_id=current_model.model_id,
+                            prompt=cleaned_prompt,
+                            context=context,
+                            options=opts,
+                        )
+                        await store.save_cached_response(
+                            cache_key=save_cache_key,
+                            data={
+                                "content": execution_result.content,
+                                "model_id": current_model.model_id,
+                                "prompt_tokens": execution_result.prompt_tokens,
+                                "completion_tokens": execution_result.completion_tokens,
+                                "latency_ms": execution_result.latency_ms,
+                                "raw_response": execution_result.raw_response,
+                            },
+                            ttl_seconds=settings.response_cache_ttl_seconds,
+                        )
+                    except Exception as cache_save_err:
+                        logger.warning("Error saving response cache: %s", type(cache_save_err).__name__)
+
                 result_snapshot = {
                     "content": execution_result.content,
                     "model_id": current_model.model_id,
@@ -419,6 +510,9 @@ class OrchestrationEngine:
                     error=None,
                     metadata={
                         **opts.get("metadata", {}),
+                        "cached": False,
+                        "cache_status": "MISS",
+                        "cache_saved_tokens": 0,
                         "attempt_count": attempt_count,
                         "escalation_history": escalation_history,
                         "escalated": len(escalation_history) > 0,

@@ -48,6 +48,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CONTEXT_TTL_SECONDS", "context_ttl_seconds"),
         description="TTL in seconds for stored conversation context.",
     )
+    response_cache_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("RESPONSE_CACHE_ENABLED", "response_cache_enabled"),
+        description="Whether to enable deterministic response caching.",
+    )
+    response_cache_ttl_seconds: int = Field(
+        default=3600,
+        validation_alias=AliasChoices("RESPONSE_CACHE_TTL_SECONDS", "response_cache_ttl_seconds"),
+        description="TTL in seconds for cached model responses.",
+    )
 
     # Observability & Metrics
     metrics_enabled: bool = Field(

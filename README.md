@@ -1,4 +1,4 @@
-# 🚀 Adaptive LLM Orchestrator
+# Adaptive LLM Orchestrator
 
 ### Intelligent Model Routing • Context-Aware Conversations • Smart Response Caching
 
@@ -10,7 +10,7 @@ It also provides conversation context management, optional Redis-backed storage,
 
 ---
 
-## 🌟 Project Overview
+## Project Overview
 
 Modern AI applications often face several challenges:
 
@@ -31,7 +31,7 @@ The orchestrator evaluates each incoming request and coordinates the appropriate
 
 ---
 
-## ✨ Key Features
+## Key Features
 
 ### 1. Intelligent Prompt Analysis
 
@@ -188,7 +188,7 @@ The application provides:
 
 ---
 
-## 🏗️ System Architecture
+## System Architecture
 
 ```mermaid
 flowchart TD
@@ -225,7 +225,7 @@ flowchart TD
 
 ---
 
-## 🛠️ Technology Stack
+## Technology Stack
 
 | Technology        | Purpose                                       |
 | ----------------- | --------------------------------------------- |
@@ -240,7 +240,7 @@ flowchart TD
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```text
 adaptive-orchestrator/
@@ -272,7 +272,7 @@ adaptive-orchestrator/
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -401,7 +401,7 @@ The reported 360 saved tokens are the application's estimated cache-saving metad
 
 ---
 
-## 🧪 Running Tests
+## Running Tests
 
 Run the automated test suite:
 
@@ -417,7 +417,7 @@ Latest verified development result:
 
 ---
 
-## 🌐 Live Demo
+## Live Demo
 
 **Production API:**
 
@@ -431,7 +431,7 @@ The deployed service uses the currently configured Gemini provider. Free hosting
 
 ---
 
-## 🔮 Future Roadmap
+## Future Roadmap
 
 Potential improvements include:
 
@@ -447,7 +447,7 @@ Potential improvements include:
 
 ---
 
-## 💡 Why This Project?
+## Why This Project?
 
 Adaptive LLM Orchestrator explores a practical approach to building more efficient AI applications.
 
@@ -457,7 +457,7 @@ By combining intelligent routing, reusable context, optional persistent storage,
 
 ---
 
-## 👨‍💻 Author
+## Author
 
 **Akash Kumar**
 
@@ -465,6 +465,6 @@ GitHub: https://github.com/kumarakshu
 
 ---
 
-## 📜 License
+## License
 
 Add an appropriate open-source license before distributing the project for reuse.

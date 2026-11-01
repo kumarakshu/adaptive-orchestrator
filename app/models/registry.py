@@ -163,6 +163,13 @@ class ModelRegistry:
         """
         registry = cls()
 
+        # Optional override of the Gemini model id via GEMINI_MODEL env var
+        try:
+            from app.core.config import get_settings
+            gemini_model_id = (get_settings().gemini_model_id or "").strip() or "gemini-3.8-flash"
+        except Exception:
+            gemini_model_id = "gemini-3.8-flash"
+
         example_models = [
             # Lightweight tier
             ModelDescriptor(
@@ -174,7 +181,7 @@ class ModelRegistry:
                 enabled=True,
             ),
             ModelDescriptor(
-                model_id="gemini-3.8-flash",
+                model_id=gemini_model_id,
                 provider="google",
                 tier=ModelTier.LIGHTWEIGHT,
                 supported_capabilities=["chat", "code", "tools", "json", "vision", "reasoning"],

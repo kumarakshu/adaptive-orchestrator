@@ -93,6 +93,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("GEMINI_MAX_RETRIES", "gemini_max_retries"),
         description="Maximum transient retries for Gemini requests (bounded).",
     )
+    gemini_api_mode: str = Field(
+        default="generate_content",
+        validation_alias=AliasChoices("GEMINI_API_MODE", "gemini_api_mode"),
+        description="'generate_content' (stable, fast) or 'interactions' (beta, can be slow/time out).",
+    )
+    gemini_model_id: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("GEMINI_MODEL", "GEMINI_MODEL_ID", "gemini_model_id"),
+        description="Optional override of the Gemini model id used in the registry (e.g. gemini-2.5-flash).",
+    )
     max_escalation_retries: int = Field(default=2, alias="MAX_ESCALATION_RETRIES")
     confidence_threshold: float = Field(default=0.75, alias="CONFIDENCE_THRESHOLD")
 

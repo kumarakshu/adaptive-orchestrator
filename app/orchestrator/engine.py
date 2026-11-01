@@ -604,6 +604,15 @@ class OrchestrationEngine:
         else:
             error_msg = "Model execution failed and could not be escalated further."
 
+        # Include the full provider failure chain so the root cause (e.g. the first
+        # provider's timeout) is not hidden behind the last fallback's error.
+        if escalation_history and error_msg:
+            chain = " | ".join(
+                f"{h.get('from_model')}: {h.get('reason')}" for h in escalation_history if h.get("reason")
+            )
+            if chain:
+                error_msg = f"{error_msg} || Earlier attempts -> {chain}"
+
         await _save_cp(
             status="failed",
             attempt_count=attempt_count,

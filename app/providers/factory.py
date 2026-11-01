@@ -59,6 +59,7 @@ def create_configured_providers(
             timeout_seconds=gemini_timeout,
             attempt_timeout_seconds=gemini_attempt_timeout,
             max_retries=gemini_retries,
+            api_mode=getattr(cfg, "gemini_api_mode", "generate_content"),
         )
 
     return providers

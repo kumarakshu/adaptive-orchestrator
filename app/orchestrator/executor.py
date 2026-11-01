@@ -115,11 +115,55 @@ class ModelExecutor(BaseExecutor):
         providers: Optional[Dict[str, ProviderHandler]] = None,
         default_provider: Optional[ProviderHandler] = None,
         raise_on_error: bool = False,
+        provider_cooldown_seconds: float = 300.0,
     ) -> None:
         """Initialize executor with optional provider mapping."""
         self._providers: Dict[str, ProviderHandler] = dict(providers or {})
         self._default_provider = default_provider
         self.raise_on_error = raise_on_error
+        # Circuit breaker: providers failing with billing/auth/quota errors are
+        # skipped for a cooldown period instead of being retried on every request.
+        self._provider_cooldown_seconds = max(0.0, float(provider_cooldown_seconds))
+        self._disabled_until: Dict[str, float] = {}
+
+    # Error markers meaning the provider cannot work until the account/key is fixed.
+    _FATAL_ERROR_MARKERS = (
+        "credit balance",
+        "no credits",
+        "insufficient_quota",
+        "exceeded your current quota",
+        "billing",
+        "api key not valid",
+        "invalid api key",
+        "invalid x-api-key",
+        "incorrect api key",
+        "api key is not configured",
+        "permission denied",
+    )
+
+    @classmethod
+    def _is_fatal_provider_error(cls, exc: BaseException) -> bool:
+        """Return True for non-transient errors (billing, quota, bad/missing key)."""
+        status = getattr(exc, "status_code", None)
+        text = str(exc).lower()
+        if status in (401, 402, 403):
+            return True
+        return any(marker in text for marker in cls._FATAL_ERROR_MARKERS)
+
+    def _is_cooling_down(self, provider_name: str) -> bool:
+        until = self._disabled_until.get(provider_name.lower())
+        if until is None:
+            return False
+        if time.monotonic() >= until:
+            self._disabled_until.pop(provider_name.lower(), None)
+            return False
+        return True
+
+    def _disable_provider_temporarily(self, provider_name: str) -> None:
+        if self._provider_cooldown_seconds > 0:
+            self._disabled_until[provider_name.lower()] = (
+                time.monotonic() + self._provider_cooldown_seconds
+            )
 
     def register_provider(self, provider_name: str, handler: ProviderHandler) -> None:
         """Register a provider handler by provider name (e.g., 'openai', 'anthropic', 'mock')."""
@@ -130,7 +174,9 @@ class ModelExecutor(BaseExecutor):
         return self._providers.pop(provider_name.lower(), None)
 
     def has_provider(self, provider_name: str) -> bool:
-        """Check whether a provider is registered."""
+        """Check whether a provider is registered and not in billing/auth cooldown."""
+        if self._is_cooling_down(provider_name):
+            return False
         return provider_name.lower() in self._providers or self._default_provider is not None
 
     def get_provider(self, provider_name: str) -> Optional[ProviderHandler]:
@@ -138,8 +184,8 @@ class ModelExecutor(BaseExecutor):
         return self._providers.get(provider_name.lower(), self._default_provider)
 
     def list_providers(self) -> List[str]:
-        """List all explicitly registered provider names."""
-        return list(self._providers.keys())
+        """List registered provider names (excluding providers in billing/auth cooldown)."""
+        return [name for name in self._providers if not self._is_cooling_down(name)]
 
     def _resolve_model(self, target: Union[RoutingDecision, ModelDescriptor]) -> ModelDescriptor:
         """Extract ModelDescriptor from RoutingDecision or direct descriptor."""
@@ -265,6 +311,8 @@ class ModelExecutor(BaseExecutor):
         except Exception as exc:
             latency_ms = (time.perf_counter() - start_time) * 1000.0
             err_msg = f"Provider '{model.provider}' failed during execution: {exc}"
+            if self._is_fatal_provider_error(exc):
+                self._disable_provider_temporarily(provider_name)
             if self.raise_on_error:
                 raise ProviderExecutionError(err_msg) from exc
             return ExecutionResult(

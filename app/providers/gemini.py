@@ -28,6 +28,7 @@ class GeminiProvider(BaseHTTPProvider):
         max_retries: int = 1,
         retry_delay_seconds: float = 1.0,
         attempt_timeout_seconds: float = 22.0,
+        api_mode: str = "interactions",
     ) -> None:
         super().__init__(
             api_key=api_key,
@@ -38,9 +39,25 @@ class GeminiProvider(BaseHTTPProvider):
         # If legacy base_url pointing to /models was passed, normalize to /interactions
         if self._base_url.endswith("/models"):
             self._base_url = self._base_url[:-7] + "/interactions"
+        mode = (api_mode or "interactions").strip().lower().replace("-", "_")
+        self._api_mode = mode if mode in ("interactions", "generate_content") else "interactions"
         self._max_retries = max(0, min(int(max_retries), 3))
         self._retry_delay_seconds = max(0.0, min(float(retry_delay_seconds), 5.0))
         self._attempt_timeout_seconds = max(1.0, min(float(attempt_timeout_seconds), 60.0))
+
+    @property
+    def api_mode(self) -> str:
+        """Active API mode: 'interactions' (beta) or 'generate_content' (stable)."""
+        return self._api_mode
+
+    def _generate_content_url(self, model_id: str) -> str:
+        """Build the stable generateContent endpoint URL for a model."""
+        root = self._base_url
+        for suffix in ("/interactions", "/models"):
+            if root.endswith(suffix):
+                root = root[: -len(suffix)]
+        name = model_id if model_id.startswith("models/") else f"models/{model_id}"
+        return f"{root}/{name}:generateContent"
 
     @property
     def max_retries(self) -> int:
@@ -78,15 +95,6 @@ class GeminiProvider(BaseHTTPProvider):
         else:
             input_text = prompt
 
-        payload: Dict[str, Any] = {
-            "model": model.model_id,
-            "input": input_text,
-            "store": False,
-        }
-
-        if system_prompt:
-            payload["system_instruction"] = system_prompt
-
         # Generation config forwarding & normalization
         gen_config: Dict[str, Any] = {}
         if context and isinstance(context, dict):
@@ -105,15 +113,43 @@ class GeminiProvider(BaseHTTPProvider):
             if "gemini-3" in model.model_id.lower():
                 gen_config["thinking_level"] = "low"
 
-        if gen_config:
-            payload["generation_config"] = gen_config
-
         headers = {
             "x-goog-api-key": api_key,
             "Content-Type": "application/json",
         }
 
-        url = self._base_url
+        if self._api_mode == "generate_content":
+            url = self._generate_content_url(model.model_id)
+            contents = [
+                {
+                    "role": "user" if msg["role"] == "user" else "model",
+                    "parts": [{"text": msg["content"]}],
+                }
+                for msg in extracted_messages
+            ]
+            payload: Dict[str, Any] = {"contents": contents}
+            if system_prompt:
+                payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
+            gc: Dict[str, Any] = {}
+            level = gen_config.pop("thinking_level", None)
+            if level:
+                gc["thinkingConfig"] = {"thinkingLevel": str(level).lower()}
+            for key, value in gen_config.items():
+                gc[key] = value
+            if gc:
+                payload["generationConfig"] = gc
+        else:
+            url = self._base_url
+            payload = {
+                "model": model.model_id,
+                "input": input_text,
+                "store": False,
+            }
+            if system_prompt:
+                payload["system_instruction"] = system_prompt
+            if gen_config:
+                payload["generation_config"] = gen_config
+
         total_budget = float(self._timeout_seconds)
         start_time = time.monotonic()
 

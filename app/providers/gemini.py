@@ -171,6 +171,24 @@ class GeminiProvider(BaseHTTPProvider):
                         delay = min(base_delay + jitter, 5.0)
 
                     time_left = total_budget - (time.monotonic() - start_time)
+                    min_retry_budget = 10.0
+                    if (time_left - delay) < min_retry_budget:
+                        logger.warning(
+                            "Google Gemini: aborting retry; insufficient time budget remaining for viable attempt (%.2fs left, need %.2fs).",
+                            time_left - delay,
+                            min_retry_budget,
+                        )
+                        raise exc
+
+                    # If this was a timeout and remaining time is less than needed for generation,
+                    # retrying with insufficient time is guaranteed to fail.
+                    if "timed out" in err_str and (time_left - delay) < (self._attempt_timeout_seconds * 0.75):
+                        logger.warning(
+                            "Google Gemini: aborting retry on timeout; remaining budget (%.2fs) is less than required for generation.",
+                            time_left - delay,
+                        )
+                        raise exc
+
                     if delay >= time_left - 0.5:
                         logger.warning(
                             "Google Gemini: aborting retry; insufficient time budget remaining (%.2fs left, need %.2fs delay).",

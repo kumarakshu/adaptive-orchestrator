@@ -72,6 +72,18 @@ def test_analyzer_complex_coding_with_backticks(analyzer: PromptAnalyzer):
     assert result.requires_reasoning is True
 
 
+def test_analyzer_fintech_architecture_complex_classification(analyzer: PromptAnalyzer):
+    """Verify complex fintech architecture prompts are categorized as CODING/COMPLEX with advanced tier."""
+    prompt = "Design a high-availability fintech architecture for real-time transaction processing with microservices, Kafka, Redis, and ACID compliance."
+    result = analyzer.analyze(prompt)
+
+    assert result.task_type == TaskType.CODING
+    assert result.complexity == ComplexityLevel.COMPLEX
+    assert result.suggested_tier == "advanced"
+    assert result.requires_reasoning is True
+    assert "complex_coding_request" in result.detected_signals
+
+
 # 4. Multi-step and complex prompts with constraints
 def test_analyzer_multi_step_and_constraints(analyzer: PromptAnalyzer):
     """Verify prompts with multiple sequential steps and constraints trigger complex classification."""

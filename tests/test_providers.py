@@ -649,6 +649,50 @@ async def test_gemini_first_attempt_timeout_recovers_on_retry():
 
 
 @pytest.mark.asyncio
+async def test_gemini_avoids_doomed_short_retry_when_budget_insufficient():
+    """Verify that when attempt 0 times out leaving < 10s budget, retry is aborted rather than sending a doomed short attempt."""
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        raise httpx.ReadTimeout("Request timed out reading response")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = GeminiProvider(
+        api_key="gemini-key",
+        client=client,
+        timeout_seconds=45.0,
+        attempt_timeout_seconds=42.0,
+        max_retries=1,
+        retry_delay_seconds=1.0,
+    )
+    import time
+    orig_monotonic = time.monotonic
+    time_calls = 0
+
+    def mock_monotonic():
+        nonlocal time_calls
+        time_calls += 1
+        if time_calls <= 2:
+            return 0.0
+        return 42.0
+
+    time.monotonic = mock_monotonic
+    try:
+        model = _dummy_model("google", "gemini-3.8-flash")
+        caught = None
+        try:
+            await provider.call("ping", model)
+        except ProviderExecutionError as exc:
+            caught = exc
+        assert caught is not None
+        assert call_count == 1
+    finally:
+        time.monotonic = orig_monotonic
+
+
+@pytest.mark.asyncio
 async def test_gemini_reporting_of_underlying_timeout_type():
     """Verify underlying timeout exception types (ReadTimeout, ConnectTimeout) are reported in cause_type."""
     def read_timeout_handler(request: httpx.Request) -> httpx.Response:

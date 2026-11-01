@@ -177,7 +177,7 @@ class ModelRegistry:
                 model_id="gemini-3.8-flash",
                 provider="google",
                 tier=ModelTier.LIGHTWEIGHT,
-                supported_capabilities=["chat", "code", "tools", "json", "vision"],
+                supported_capabilities=["chat", "code", "tools", "json", "vision", "reasoning"],
                 context_window=1048576,
                 enabled=True,
             ),

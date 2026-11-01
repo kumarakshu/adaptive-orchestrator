@@ -592,6 +592,47 @@ async def test_orchestration_gemini_only_fails_gracefully_without_escalating_to_
 
 
 @pytest.mark.asyncio
+async def test_orchestration_complex_query_falls_back_gracefully_when_only_gemini_configured():
+    """Verify complex query preferring advanced tier falls back to Gemini and does not falsely claim escalation."""
+    registry = ModelRegistry.with_default_models()
+    executor = ModelExecutor()
+
+    call_records = []
+
+    async def mock_gemini(prompt: str, model, context=None):
+        call_records.append((model.provider, model.model_id))
+        return {
+            "content": "Fintech architecture design with event-driven ledger",
+            "model_id": model.model_id,
+            "prompt_tokens": 50,
+            "completion_tokens": 100,
+        }
+
+    executor.register_provider("google", mock_gemini)
+
+    engine = OrchestrationEngine(
+        registry=registry,
+        executor=executor,
+    )
+
+    result = await engine.orchestrate(
+        prompt="Design a high-availability fintech architecture for real-time transaction processing with microservices and ACID compliance",
+    )
+
+    assert result.success is True
+    assert result.analysis.task_type.value == "coding"
+    assert result.analysis.complexity.value == "complex"
+    assert result.routing.preferred_tier.value == "advanced"
+    assert result.routing.fallback_used is True
+    assert result.model_id == "gemini-3.8-flash"
+    assert result.selected_tier.value == "lightweight"
+    assert result.metadata.get("escalated") is False
+    assert len(result.metadata.get("escalation_history", [])) == 0
+    assert len(call_records) == 1
+    assert call_records[0] == ("google", "gemini-3.8-flash")
+
+
+@pytest.mark.asyncio
 async def test_failed_task_checkpoint_cannot_be_rerun_requires_fresh_task_id(mock_registry: ModelRegistry):
     """Verify terminally failed tasks cannot be rerun with the same task_id."""
     store = InMemoryContextStore()

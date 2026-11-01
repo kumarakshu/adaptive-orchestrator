@@ -127,6 +127,11 @@ class PromptAnalyzer:
         re.IGNORECASE,
     )
 
+    _ARCHITECTURE_PATTERN = re.compile(
+        r"\b(architecture|architect|system design|microservices?|distributed system|high availability|fault tolerance|scalability|fintech|payment gateway|transaction processing|acid compliance|event[- ]driven|event sourcing|cqrs|data pipeline|infrastructure|load balanc(ing|er)|caching layer|database replication)\b",
+        re.IGNORECASE,
+    )
+
     _REASONING_PATTERN = re.compile(
         r"\b(why does|solve this|riddle|puzzle|deduce|deduction|logical|prove that|mathematical proof|solve for|calculate probability|trade-off|tradeoff|causal|counterfactual|step-by-step reasoning|think carefully)\b",
         re.IGNORECASE,
@@ -192,8 +197,8 @@ class PromptAnalyzer:
             if "```" not in text or "json" in text.lower():
                 return TaskType.STRUCTURED_OUTPUT
 
-        # Check coding
-        if self._CODE_PATTERN.search(text):
+        # Check coding and software architecture
+        if self._CODE_PATTERN.search(text) or self._ARCHITECTURE_PATTERN.search(text):
             return TaskType.CODING
 
         # Check reasoning
@@ -237,9 +242,13 @@ class PromptAnalyzer:
         if len(constraint_matches) >= self.config.constraint_threshold:
             signals.append(f"multiple_constraints ({len(constraint_matches)} constraints detected)")
 
-        # 5. Complex coding requests
-        if task_type == TaskType.CODING:
-            if re.search(r"\b(refactor|architect|optimize|concurrency|async|full implementation|unit test)\b", text, re.IGNORECASE):
+        # 5. Complex coding and software architecture requests
+        if task_type == TaskType.CODING or self._ARCHITECTURE_PATTERN.search(text):
+            if re.search(
+                r"\b(refactor|architect|architecture|system design|optimize|concurrency|async|full implementation|unit test|microservices?|distributed system|high availability|fault tolerance|scalability|fintech|transaction processing|acid)\b",
+                text,
+                re.IGNORECASE,
+            ):
                 signals.append("complex_coding_request")
 
         # 6. Deep reasoning requested
@@ -257,6 +266,10 @@ class PromptAnalyzer:
         """Classify prompt into simple, medium, or complex based on signals and size."""
         # Very long prompts are automatically complex
         if estimated_tokens >= self.config.very_long_prompt_tokens:
+            return ComplexityLevel.COMPLEX
+
+        # Explicit complex coding or architecture request signal indicates high complexity
+        if "complex_coding_request" in signals:
             return ComplexityLevel.COMPLEX
 
         # Multiple complex signals indicate high complexity
